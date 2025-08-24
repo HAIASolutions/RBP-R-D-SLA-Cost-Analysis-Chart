@@ -1,0 +1,250 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>R&D Cost Comparison Dashboard (v4)</title>
+<style>
+  :root { --fg:#111; --muted:#666; --line:#e5e5e5; }
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; color: var(--fg); }
+  h1 { font-size: 22px; margin-bottom: 6px; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .row { display:flex; flex-wrap:wrap; gap: 16px; align-items:center; }
+  .card { border:1px solid #ddd; border-radius:12px; padding:16px; margin-top:12px; }
+  label { font-weight:600; margin-right:8px; }
+  select, input[type=checkbox], input[type=range], input[type=number] { font-size:14px; }
+  input[type=range]{ width:260px; }
+  input[type=number]{ width:140px; padding:6px 8px; }
+  canvas{ width:100%; height:420px; border:1px solid #eee; border-radius:12px; }
+  #legend{ display:flex; flex-wrap:wrap; gap:14px; margin-top:8px; }
+  .legend-item{ display:flex; align-items:center; gap:6px; font-size:13px;}
+  .swatch{ width:16px; height:3px; background:#000; }
+  table { border-collapse: collapse; width: 100%; margin-top: 12px; font-size: 13px; }
+  th, td { border: 1px solid var(--line); padding: 6px 10px; text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  .pill { display:inline-block; padding:3px 8px; border:1px solid #ddd; border-radius:999px; font-size:12px; margin-right:6px;}
+</style>
+</head>
+<body>
+  <h1>R&D Cost Comparison (v4)</h1>
+  <div class="muted">
+    Option 1: <b>$120,000 upfront</b> + (SLA rate × active clients) billed monthly. 
+    Option 2 (“<b>All Inclusive R&amp;D Package</b>”): <b>$10,000 upfront</b> + (<b>rate × active clients</b>) monthly. 
+    Active clients compound month‑to‑month via growth.
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <div>
+        <label for="growth">New clients per month:</label>
+        <input id="growth" type="range" min="0" max="30" step="1" value="12"/>
+        <span id="growthVal" class="pill">12</span>
+      </div>
+      <div>
+        <label for="start">Starting clients:</label>
+        <input id="start" type="range" min="0" max="200" step="1" value="0"/>
+        <span id="startVal" class="pill">0</span>
+      </div>
+      <div>
+        <label for="sla">SLA Tier (Option 1 only):</label>
+        <select id="sla">
+          <option value="0">None (base $120k)</option>
+          <option value="100">Bronze ($100/client/mo)</option>
+          <option value="150">Silver ($150/client/mo)</option>
+          <option value="200" selected>Gold ($200/client/mo)</option>
+          <option value="300">Platinum ($300/client/mo)</option>
+        </select>
+      </div>
+      <div>
+        <label><input id="customSLA" type="checkbox"/> Use custom SLA rate</label>
+        <input id="customSLAVal" type="number" min="0" step="1" value="200" disabled/> <span class="muted">$/client/mo</span>
+      </div>
+      <div>
+        <label><input id="customO2" type="checkbox"/> All Inclusive R&amp;D Package</label>
+        <input id="customO2Val" type="number" min="0" step="0.01" value="416.67" disabled/> <span class="muted">$/client/mo</span>
+      </div>
+      <div>
+        <label><input id="startM2" type="checkbox"/> Start monthly charges in month 2</label>
+      </div>
+      <div>
+        <label><input id="showO2" type="checkbox" checked/> Show Option 2</label>
+      </div>
+      <div>
+        <label><input id="showMonthly" type="checkbox"/> Show monthly (not cumulative)</label>
+      </div>
+      <div>
+        <label><input id="showTable" type="checkbox"/> Show data table</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <canvas id="chart" width="1200" height="420"></canvas>
+    <div id="legend"></div>
+  </div>
+
+  <div id="tableWrap" class="card" style="display:none;">
+    <div class="muted">Table shows values for each month 1–12 under the current settings.</div>
+    <div id="table"></div>
+  </div>
+
+<script>
+(function(){
+  const MONTHS = Array.from({length:12}, (_,i)=>i+1);
+  const O1_UP = 120000, O2_UP = 10000, O2_DEF_RATE = 416.67;
+
+  // UI
+  const growth = document.getElementById('growth');
+  const growthVal = document.getElementById('growthVal');
+  const start = document.getElementById('start');
+  const startVal = document.getElementById('startVal');
+  const sla = document.getElementById('sla');
+  const customSLA = document.getElementById('customSLA');
+  const customSLAVal = document.getElementById('customSLAVal');
+  const customO2 = document.getElementById('customO2');
+  const customO2Val = document.getElementById('customO2Val');
+  const startM2 = document.getElementById('startM2');
+  const showO2 = document.getElementById('showO2');
+  const showMonthly = document.getElementById('showMonthly');
+  const showTable = document.getElementById('showTable');
+  const canvas = document.getElementById('chart');
+  const ctx = canvas.getContext('2d');
+  const legend = document.getElementById('legend');
+  const tableWrap = document.getElementById('tableWrap');
+  const tableDiv = document.getElementById('table');
+
+  customSLA.addEventListener('change', ()=>{ customSLAVal.disabled = !customSLA.checked; });
+  customO2.addEventListener('change', ()=>{ customO2Val.disabled = !customO2.checked; });
+
+  function seqClients(gpm, s0){ return MONTHS.map(m => s0 + gpm*m); }
+
+  function series(gpm, s0, slaRate, o2Rate, monthlyStartsMonth2){
+    const C = seqClients(gpm, s0);
+    const o1_monthly = C.map((c,idx)=> (idx===0?O1_UP:0) + (monthlyStartsMonth2 && idx===0 ? 0 : slaRate*c));
+    const o2_monthly = C.map((c,idx)=> (idx===0?O2_UP:0) + (monthlyStartsMonth2 && idx===0 ? 0 : o2Rate*c));
+    const o1_cum = o1_monthly.reduce((acc, x)=>{ acc.push((acc.length?acc[acc.length-1]:0)+x); return acc; },[]);
+    const o2_cum = o2_monthly.reduce((acc, x)=>{ acc.push((acc.length?acc[acc.length-1]:0)+x); return acc; },[]);
+    const o1_base_cum = MONTHS.map(_=>O1_UP);
+    return {C, o1_monthly, o2_monthly, o1_cum, o2_cum, o1_base_cum};
+  }
+
+  function minMax(arr){ const mn = Math.min(...arr), mx = Math.max(...arr); const pad = (mx-mn)*0.08 || 10000; return {min:mn-pad, max:mx+pad}; }
+  function drawAxes(min, max){
+    ctx.clearRect(0,0,canvas.width, canvas.height);
+    const left=60, right=canvas.width-20, top=20, bottom=canvas.height-40;
+    const w=right-left, h=bottom-top;
+    ctx.strokeStyle='#eee'; ctx.fillStyle='#444'; ctx.lineWidth=1;
+    const ticks=6;
+    for(let t=0;t<=ticks;t++){
+      const val = min + (t/ticks)*(max-min);
+      const y = bottom - ((val-min)/(max-min))*h;
+      ctx.beginPath(); ctx.moveTo(left,y); ctx.lineTo(right,y); ctx.stroke();
+      ctx.fillText('$'+Math.round(val).toLocaleString(), 8, y+4);
+    }
+    for(let i=0;i<MONTHS.length;i++){
+      const x = left + (i/(MONTHS.length-1))*w;
+      ctx.fillText(String(MONTHS[i]), x-3, bottom+16);
+    }
+    ctx.beginPath(); ctx.moveTo(left, top); ctx.lineTo(left, bottom); ctx.lineTo(right, bottom); ctx.strokeStyle='#ccc'; ctx.stroke();
+    return {left,right,top,bottom,w,h,min,max};
+  }
+
+  function drawLine(vals, color, axes){
+    const {left, bottom, w, h, min, max} = axes;
+    ctx.beginPath(); ctx.lineWidth=2; ctx.strokeStyle=color;
+    vals.forEach((v,i)=>{
+      const x = left + (i/(vals.length-1))*w;
+      const y = bottom - ((v-min)/(max-min))*h;
+      if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    });
+    ctx.stroke();
+    ctx.fillStyle=color;
+    vals.forEach((v,i)=>{
+      const x = left + (i/(vals.length-1))*w;
+      const y = bottom - ((v-min)/(max-min))*h;
+      ctx.beginPath(); ctx.arc(x,y,3,0,Math.PI*2); ctx.fill();
+    });
+  }
+
+  function buildLegend(lines){
+    legend.innerHTML='';
+    lines.forEach(l=>{
+      const el = document.createElement('div'); el.className='legend-item';
+      const sw = document.createElement('div'); sw.className='swatch'; sw.style.background=l.color;
+      const txt = document.createElement('div'); txt.textContent = l.label;
+      el.appendChild(sw); el.appendChild(txt); legend.appendChild(el);
+    });
+  }
+
+  function makeTable(data, showO2, showMonthly, o2Rate){
+    const months = MONTHS;
+    const C = data.C, o1m=data.o1_monthly, o2m=data.o2_monthly, o1c=data.o1_cum, o2c=data.o2_cum;
+    let html = '<table><thead><tr><th>Month</th><th>Active clients</th>';
+    if(showMonthly){
+      html += '<th>Option 1 Monthly ($)</th>';
+      if(showO2) html += `<th>All Inclusive R&amp;D Package Monthly ($${o2Rate.toFixed(2)}/client)</th>`;
+    } else {
+      html += '<th>Option 1 Cumulative ($)</th>';
+      if(showO2) html += `<th>All Inclusive R&amp;D Package Cumulative ($${o2Rate.toFixed(2)}/client)</th>`;
+    }
+    html += '</tr></thead><tbody>';
+    for(let i=0;i<months.length;i++){
+      html += '<tr><td>'+months[i]+'</td><td>'+C[i]+'</td>';
+      if(showMonthly){
+        html += '<td>'+Math.round(o1m[i]).toLocaleString()+'</td>';
+        if(showO2) html += '<td>'+Math.round(o2m[i]).toLocaleString()+'</td>';
+      } else {
+        html += '<td>'+Math.round(o1c[i]).toLocaleString()+'</td>';
+        if(showO2) html += '<td>'+Math.round(o2c[i]).toLocaleString()+'</td>';
+      }
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+    tableDiv.innerHTML = html;
+  }
+
+  const COLORS = ['#1f77b4','#2ca02c','#ff7f0e'];
+
+  function render(){
+    growthVal.textContent = growth.value;
+    startVal.textContent = start.value;
+    const gpm = parseInt(growth.value,10);
+    const s0 = parseInt(start.value,10);
+    let slaRate = customSLA.checked ? parseFloat(customSLAVal.value) : parseFloat(sla.value);
+    if (isNaN(slaRate) || slaRate < 0) slaRate = 0;
+    let o2Rate = customO2.checked ? parseFloat(customO2Val.value) : O2_DEF_RATE;
+    if (isNaN(o2Rate) || o2Rate < 0) o2Rate = 0;
+    const monthlyStartsMonth2 = !!startM2.checked;
+    const showO2Val = !!showO2.checked;
+    const showMonthlyVal = !!showMonthly.checked;
+
+    const data = series(gpm, s0, slaRate, o2Rate, monthlyStartsMonth2);
+    const lines = [];
+
+    if(showMonthlyVal){
+      lines.push({label: 'Option 1 Monthly', values: data.o1_monthly, color: COLORS[0]});
+      if(showO2Val) lines.push({label: `All Inclusive R&D Package Monthly ($${o2Rate.toFixed(2)}/client/mo)`, values: data.o2_monthly, color: COLORS[2]});
+    } else {
+      lines.push({label: 'Option 1: $120k upfront baseline', values: data.o1_base_cum, color: COLORS[0]});
+      lines.push({label: (slaRate>0? `Option 1 + SLA ($${slaRate.toFixed(2)}/client/mo)` : 'Option 1 (no SLA) cumulative'), values: data.o1_cum, color: COLORS[1]});
+      if(showO2Val) lines.push({label: `All Inclusive R&D Package cumulative ($${o2Rate.toFixed(2)}/client/mo)`, values: data.o2_cum, color: COLORS[2]});
+    }
+
+    const flat = lines.flatMap(l => l.values);
+    const {min, max} = (function(){ const mn=Math.min(...flat), mx=Math.max(...flat); const pad=(mx-mn)*0.08||10000; return {min:mn-pad, max:mx+pad}; })();
+    const axes = drawAxes(min, max);
+    lines.forEach(l => drawLine(l.values, l.color, axes));
+    buildLegend(lines);
+
+    if(showTable.checked){ tableWrap.style.display='block'; makeTable(data, showO2Val, showMonthlyVal, o2Rate); }
+    else { tableWrap.style.display='none'; }
+  }
+
+  [growth, start, sla, customSLA, customSLAVal, customO2, customO2Val, startM2, showO2, showMonthly, showTable].forEach(el => el.addEventListener('input', render));
+
+  render();
+})();
+</script>
+</body>
+</html>
